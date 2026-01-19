@@ -14,45 +14,17 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 public class LoginInterceptor implements HandlerInterceptor {
-
-    //这个拦截器不是spring的对象，不能@Bean注入stringRedisTemplate;
-    private StringRedisTemplate stringRedisTemplate;
-
-    public LoginInterceptor(StringRedisTemplate stringRedisTemplate) {
-        this.stringRedisTemplate = stringRedisTemplate;
-    }
-
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        // 1.获取请求头中的token
-        String token = request.getHeader("Authorization");
-        if (StrUtil.isBlank(token)) {
-            // 不存在，拦截，返回401状态码, 未授权
+        // 1.判断是否需要拦截(threadlocal中是否有用户)
+        if (UserHolder.getUser() == null) {
+            // 没有，需要拦截，设置状态码 401
             response.setStatus(401);
+            // 拦截
             return false;
         }
 
-        // 2.基于token获取redis中的用户
-        String tokenKey = RedisConstants.LOGIN_USER_KEY + token;
-        Map<Object, Object> userMap = stringRedisTemplate.opsForHash().entries(tokenKey);
-
-        // 3.判断用户是否存在
-        if(userMap.isEmpty()){
-            // 4.不存在，拦截，返回401状态码, 未授权
-            response.setStatus(401);
-            return false;
-        }
-
-        // 5.将查询到的hash数据转为UserDTO对象
-        UserDTO userDTO = BeanUtil.fillBeanWithMap(userMap, new UserDTO(), false);
-
-        // 6.保存用户上下文信息到ThreadLocal
-        UserHolder.saveUser(userDTO);
-
-        // 7.刷新token有效期
-        stringRedisTemplate.expire(RedisConstants.LOGIN_USER_KEY + token, RedisConstants.LOGIN_USER_TTL, TimeUnit.MINUTES);
-
-        // 8.放行
+        // 2.由用户，则放行
         return true;
     }
 
