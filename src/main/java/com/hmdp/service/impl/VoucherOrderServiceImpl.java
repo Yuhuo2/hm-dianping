@@ -9,6 +9,7 @@ import com.hmdp.service.IVoucherOrderService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
+import org.springframework.aop.framework.AopContext;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,7 +18,7 @@ import java.time.LocalDateTime;
 
 /**
  * <p>
- *  服务实现类
+ * 服务实现类
  * </p>
  *
  * @author 虎哥
@@ -32,7 +33,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private RedisIdWorker redisIdWorker;
 
     @Override
-    @Transactional
     public Result seckillVoucher(Long voucherId) {
         // 1.查询优惠券
         SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
@@ -51,30 +51,64 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             // 库存不足
             return Result.fail("库存不足！");
         }
-        //5，扣减库存
-        boolean success = seckillVoucherService.update()
-                .setSql("stock= stock -1")
-                // 乐观锁 where id = ? and stock > 0
-                .eq("voucher_id", voucherId).gt("stock", 0)
-                .update();
-        if (!success) {
-            //扣减库存
-            return Result.fail("库存不足！");
+
+        // 先获取锁，提交事务，再释放索，避免并发问题
+        Long userId = UserHolder.getUser().getId();
+
+        //synchronized ： 基于这个字符串对象加锁，同一用户的并发请求会串行执行。
+        synchronized (userId.toString().intern()) {
+
+            //直接调用类内部的createVoucherOrder方法，会导致事务注解@Transactional失效，因为Spring的事务是通过代理对象来管理的
+            //return this.createVoucherOrder(voucherId);
+
+            //获取当前的代理对象，使用代理对象调用第三方事务方法，防止事务失效
+            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();   //获取当前类的代理对象
+            return proxy.createVoucherOrder(voucherId);
         }
-        //6.创建订单
+    }
+
+    /**
+     * 通过数据库查询确保“一人一单”
+     * @param voucherId
+     * @return
+     */
+    @Transactional   // 事务注解：保证订单创建和库存扣减的原子性，并且只有事务提交后，其他请求才能看到新订单和库存变化
+    public Result createVoucherOrder(Long voucherId) {
+        //5.一人一单
+        Long userId = UserHolder.getUser().getId();
+        //5.1查询数据库中是否已经存在该用户抢购该优惠券的订单
+        int count = query().eq("user_id", userId).eq("voucher_id", voucherId).count();
+        //5.2判断是否存在
+        if (count > 0) {
+            //用户已经购买过了，返回失败信息
+            return Result.fail("用户已购买！");
+        }
+
+        //6.扣减库存
+        boolean success = seckillVoucherService.update()
+                .setSql("stock = stock - 1")   //set stock = stock - 1
+                .eq("voucher_id", voucherId).gt("stock", 0)   //where id = ? and stock > 0 数据库层面的乐观锁，避免超卖
+                .update();
+
+        if (!success) {
+            //库存扣减失败
+            return Result.fail("库存不足");
+        }
+
+        //7.创建订单（在订单表tb_voucher_order插入一条数据）
         VoucherOrder voucherOrder = new VoucherOrder();
-        // 6.1.订单id(全局唯一id生成)
+        //7.1 订单id
         long orderId = redisIdWorker.nextId("order");
         voucherOrder.setId(orderId);
-        // 6.2.用户id
-        Long userId = UserHolder.getUser().getId();
+        //7.2 用户id
         voucherOrder.setUserId(userId);
-        // 6.3.代金券id
+        //7.3 代金券id
         voucherOrder.setVoucherId(voucherId);
+
+        //插入到订单信息表
         save(voucherOrder);
 
-        // 7.返回订单id
+        //8.返回订单id（生成唯一订单id并保存）
         return Result.ok(orderId);
-
     }
 }
